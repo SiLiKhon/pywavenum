@@ -248,3 +248,22 @@ class DiscreteSignal(Signal):
             samples = np.concatenate([samples, np.zeros(n_trailing_zeros, dtype=samples.dtype)])
 
         return samples
+
+class PiecewiseLinear(Signal):
+    def __init__(self, tt: np.ndarray, yy: np.ndarray):
+        if not (np.diff(tt) > 0).all():
+            raise ValueError("Times must be consecutive")
+
+        if len(tt) != len(yy):
+            raise ValueError("Arrays must be of same size")
+        # self.tt = tt
+        # self.yy = yy
+
+        self.signal = Constant(0)
+        for t0, t1, y0, y1 in zip(tt[:-1], tt[1:], yy[:-1], yy[1:]):
+            self.signal = self.signal + Pulse(t0, t1 - 1e-7) * (
+                y0 + (y1 - y0) * (Time() - t0) / (t1 - t0)
+            )
+
+    def __call__(self, t):
+        return self.signal(t)
