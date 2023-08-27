@@ -116,6 +116,7 @@ class Time(Signal):
     def __call__(self, t: np.ndarray) -> np.ndarray:
         return t
 
+
 class Composite(Signal):
     def __init__(self, func: Callable, *signals: Signal):
         self.func = func
@@ -124,12 +125,14 @@ class Composite(Signal):
     def __call__(self, t: np.ndarray) -> np.ndarray:
         return self.func(*[s(t) for s in self.signals])
 
+
 class Constant(Signal):
     def __init__(self, value: Union[Number, Signal]):
         self.val = value
 
     def __call__(self, t: np.ndarray) -> np.ndarray:
         return self.val * np.ones_like(t)
+
 
 class Sine(Signal):
     def __init__(
@@ -153,6 +156,31 @@ class Sine(Signal):
         arg = 2 * np.pi * pre_arg
         return np.sin(arg)
 
+
+class Periodic(Signal):
+    def __init__(
+        self,
+        waveform: Callable,
+        freq: Union[Number, Signal],
+        phase: Union[Number, Signal] = 0.0,
+        phase_correction: bool = True,
+    ):
+        self.wf = waveform
+        self.freq = self._as_signal(freq)
+        self.phase = self._as_signal(phase)
+        self.phase_correction = phase_correction
+
+    def __call__(self, t: np.ndarray) -> np.ndarray:
+        freq = self.freq(t)
+        phase = self.phase(t)
+        arg = t * freq + phase
+        if self.phase_correction:
+            df = np.diff(freq, prepend=freq[0])
+            corr_phase = (df * t).cumsum()
+            arg -= corr_phase
+        return self.wf(arg % 1.0, t)
+
+
 class Step(Signal):
     def __init__(self, threshold: Number, reverse: bool = False):
         self.thr = threshold
@@ -164,6 +192,7 @@ class Step(Signal):
             cond = ~cond
         return np.where(cond, 1.0, 0.0)
 
+
 class Pulse(Signal):
     def __init__(self, start: Number, stop: Number):
         self.start = start
@@ -173,6 +202,7 @@ class Pulse(Signal):
         out = np.ones_like(t)
         return np.where((t >= self.start) & (t <= self.stop), out, 0)
 
+
 class Delay(Signal):
     def __init__(self, signal: Signal, amount: Number):
         self.signal = signal
@@ -180,6 +210,7 @@ class Delay(Signal):
 
     def __call__(self, t: np.ndarray) -> np.ndarray:
         return self.signal(t - self.amount)
+
 
 class Clip(Signal):
     def __init__(
@@ -203,6 +234,7 @@ class Clip(Signal):
             self._soft_clip(sig_vals, self.thr(t), self.softness(t))
             -self._soft_clip(-sig_vals, self.thr(t), self.softness(t))
         )
+
 
 class DiscreteSignal(Signal):
     def __init__(
@@ -249,6 +281,7 @@ class DiscreteSignal(Signal):
 
         return samples
 
+
 class PiecewiseLinear(Signal):
     def __init__(self, tt: np.ndarray, yy: np.ndarray):
         if not (np.diff(tt) > 0).all():
@@ -256,8 +289,6 @@ class PiecewiseLinear(Signal):
 
         if len(tt) != len(yy):
             raise ValueError("Arrays must be of same size")
-        # self.tt = tt
-        # self.yy = yy
 
         self.signal = Constant(0)
         for t0, t1, y0, y1 in zip(tt[:-1], tt[1:], yy[:-1], yy[1:]):
