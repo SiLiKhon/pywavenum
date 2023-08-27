@@ -16,8 +16,20 @@ def _soft_softplus(x: np.ndarray, softness: np.ndarray) -> np.ndarray:
 
 
 class Signal(ABC):
-    @abstractmethod
+    def __init__(self, time_range: Tuple[Number, Number] = (-np.inf, np.inf)):
+        if time_range[0] >= time_range[1]:
+            raise ValueError(f"Invalid time range {time_range}")
+        self.time_range = time_range
+
     def __call__(self, t: np.ndarray) -> np.ndarray:
+        result = np.empty_like(t)
+        selection = (t >= self.time_range[0]) & (t <= self.time_range[1])
+        result[~selection] = 0.0
+        result[selection] = self.render(t[selection])
+        return result
+
+    @abstractmethod
+    def render(self, t: np.ndarray) -> np.ndarray:
         ...
 
     @staticmethod
@@ -27,28 +39,28 @@ class Signal(ABC):
         return v
 
     def __add__(self, other: Union[Number, "Signal"]) -> "Signal":
-        return Composite(lambda a, b: a + b, self, Signal._as_signal(other))
+        return Composite(lambda a, b: a + b, self, Signal._as_signal(other), time_range_mode="join")
 
     def __radd__(self, other: Union[Number, "Signal"]) -> "Signal":
         return self + other
 
     def __sub__(self, other: Union[Number, "Signal"]) -> "Signal":
-        return Composite(lambda a, b: a - b, self, Signal._as_signal(other))
+        return Composite(lambda a, b: a - b, self, Signal._as_signal(other), time_range_mode="join")
 
     def __mul__(self, other: Union[Number, "Signal"]) -> "Signal":
-        return Composite(lambda a, b: a * b, self, Signal._as_signal(other))
+        return Composite(lambda a, b: a * b, self, Signal._as_signal(other), time_range_mode="intersect")
 
     def __rmul__(self, other: Union[Number, "Signal"]) -> "Signal":
         return self * other
 
     def __truediv__(self, other: Union[Number, "Signal"]) -> "Signal":
-        return Composite(lambda a, b: a / b, self, Signal._as_signal(other))
+        return Composite(lambda a, b: a / b, self, Signal._as_signal(other), time_range_mode="intersect")
 
     def __pow__(self, other: Union[Number, "Signal"]) -> "Signal":
-        return Composite(lambda a, b: a**b, self, Signal._as_signal(other))
+        return Composite(lambda a, b: a**b, self, Signal._as_signal(other), time_range_mode="join")
 
     def __rpow__(self, other: Union[Number, "Signal"]) -> "Signal":
-        return Composite(lambda a, b: a**b, Signal._as_signal(other), self)
+        return Composite(lambda a, b: a**b, Signal._as_signal(other), self, time_range_mode="join")
 
     def gain(self, dB: Union[Number, "Signal"]) -> "Signal":
         factor = 10**(Signal._as_signal(dB) / 20)
@@ -113,24 +125,36 @@ class Signal(ABC):
 
 
 class Time(Signal):
-    def __call__(self, t: np.ndarray) -> np.ndarray:
+    def render(self, t: np.ndarray) -> np.ndarray:
         return t
 
 
 class Composite(Signal):
-    def __init__(self, func: Callable, *signals: Signal):
+    def __init__(self, func: Callable, *signals: Signal, time_range_mode: str):
         self.func = func
         self.signals = signals
+        if time_range_mode == "intersect":
+            tmin = max(s.time_range[0] for s in signals)
+            tmax = min(s.time_range[1] for s in signals)
+            if tmin >= tmax:
+                tmax = tmin + 1e-7
+        elif time_range_mode == "join":
+            tmin = min(s.time_range[0] for s in signals)
+            tmax = max(s.time_range[1] for s in signals)
+        else:
+            raise NotImplementedError(time_range_mode)
+        super().__init__((tmin, tmax))
 
-    def __call__(self, t: np.ndarray) -> np.ndarray:
+    def render(self, t: np.ndarray) -> np.ndarray:
         return self.func(*[s(t) for s in self.signals])
 
 
 class Constant(Signal):
-    def __init__(self, value: Union[Number, Signal]):
+    def __init__(self, value: Union[Number, Signal], **kwargs):
+        super().__init__(**kwargs)
         self.val = value
 
-    def __call__(self, t: np.ndarray) -> np.ndarray:
+    def render(self, t: np.ndarray) -> np.ndarray:
         return self.val * np.ones_like(t)
 
 
@@ -140,12 +164,14 @@ class Sine(Signal):
         freq: Union[Number, Signal],
         phase: Union[Number, Signal] = 0.0,
         phase_correction: bool = True,
+        **kwargs,
     ):
+        super().__init__(**kwargs)
         self.freq = self._as_signal(freq)
         self.phase = self._as_signal(phase)
         self.phase_correction = phase_correction
 
-    def __call__(self, t: np.ndarray) -> np.ndarray:
+    def render(self, t: np.ndarray) -> np.ndarray:
         freq = self.freq(t)
         phase = self.phase(t)
         pre_arg = t * freq + phase
@@ -164,13 +190,15 @@ class Periodic(Signal):
         freq: Union[Number, Signal],
         phase: Union[Number, Signal] = 0.0,
         phase_correction: bool = True,
+        **kwargs,
     ):
+        super().__init__(**kwargs)
         self.wf = waveform
         self.freq = self._as_signal(freq)
         self.phase = self._as_signal(phase)
         self.phase_correction = phase_correction
 
-    def __call__(self, t: np.ndarray) -> np.ndarray:
+    def render(self, t: np.ndarray) -> np.ndarray:
         freq = self.freq(t)
         phase = self.phase(t)
         arg = t * freq + phase
@@ -182,11 +210,12 @@ class Periodic(Signal):
 
 
 class Step(Signal):
-    def __init__(self, threshold: Number, reverse: bool = False):
+    def __init__(self, threshold: Number, reverse: bool = False, **kwargs):
+        super().__init__(**kwargs)
         self.thr = threshold
         self.rev = reverse
 
-    def __call__(self, t: np.ndarray) -> np.ndarray:
+    def render(self, t: np.ndarray) -> np.ndarray:
         cond = t >= self.thr
         if self.rev:
             cond = ~cond
@@ -195,21 +224,20 @@ class Step(Signal):
 
 class Pulse(Signal):
     def __init__(self, start: Number, stop: Number):
-        self.start = start
-        self.stop = stop
+        super().__init__((start, stop))
 
-    def __call__(self, t: np.ndarray) -> np.ndarray:
-        out = np.ones_like(t)
-        return np.where((t >= self.start) & (t <= self.stop), out, 0)
+    def render(self, t: np.ndarray) -> np.ndarray:
+        return np.ones_like(t)
 
 
 class Delay(Signal):
     def __init__(self, signal: Signal, amount: Number):
+        super().__init__((signal.time_range[0] + amount, signal.time_range[1] + amount,))
         self.signal = signal
         self.amount = amount
 
-    def __call__(self, t: np.ndarray) -> np.ndarray:
-        return self.signal(t - self.amount)
+    def render(self, t: np.ndarray) -> np.ndarray:
+        return self.signal.render(t - self.amount)
 
 
 class Clip(Signal):
@@ -219,6 +247,7 @@ class Clip(Signal):
         threshold_dB: Union[Number, Signal],
         softness: Union[Number, Signal] = 0.01
     ):
+        super().__init__(signal.time_range)
         self.signal = signal
         self.softness = self._as_signal(softness)
         self.thr = 10**(self._as_signal(threshold_dB) / 20)
@@ -228,7 +257,7 @@ class Clip(Signal):
         clipped_above = thr - _soft_softplus(thr - val, softness)
         return _soft_softplus(thr + clipped_above, softness) - thr
 
-    def __call__(self, t: np.ndarray) -> np.ndarray:
+    def render(self, t: np.ndarray) -> np.ndarray:
         sig_vals = self.signal(t)
         return 0.5 * (
             self._soft_clip(sig_vals, self.thr(t), self.softness(t))
@@ -244,12 +273,13 @@ class DiscreteSignal(Signal):
         tmax: float = 1.0,
         sample_rate: int = 44100,
     ):
+        super().__init__((tmin, tmax))
         self.sample_rate = sample_rate
         self.tmin = tmin
         self.tmax = tmax
         self.tt, self.samples = signal.get_samples(tmin, tmax, sample_rate)
 
-    def __call__(self, t: np.ndarray) -> np.ndarray:
+    def render(self, t: np.ndarray) -> np.ndarray:
         dt = np.diff(t)
         if not (dt > 0).all():
             raise ValueError("All values of t must be consecutive")
@@ -290,11 +320,13 @@ class PiecewiseLinear(Signal):
         if len(tt) != len(yy):
             raise ValueError("Arrays must be of same size")
 
-        self.signal = Constant(0)
+        super().__init__((min(tt), max(tt)))
+
+        self.signal = Constant(0, time_range=self.time_range)
         for t0, t1, y0, y1 in zip(tt[:-1], tt[1:], yy[:-1], yy[1:]):
             self.signal = self.signal + Pulse(t0, t1 - 1e-7) * (
                 y0 + (y1 - y0) * (Time() - t0) / (t1 - t0)
             )
 
-    def __call__(self, t):
-        return self.signal(t)
+    def render(self, t):
+        return self.signal.render(t)
