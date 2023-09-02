@@ -49,3 +49,26 @@ class HPF(DiscreteSignal):
         alpha = (1.0 / (1.0 + self.freq / self.sample_rate))(t)
         nb_funcs.high_pass_filter(samples, alpha)
         return samples
+
+
+class Limiter(DiscreteSignal):
+    def __init__(
+        self,
+        signal: Signal,
+        thr_db: Number = -0.1,
+        attack_time_ms: Union[Number, Signal] = 5.0,
+        release_time_ms: Union[Number, Signal] = 100.0,
+    ):
+        super().__init__(signal)
+        self.thr = 10**(thr_db / 20)
+        self.attack_time = self._as_signal(attack_time_ms / 1000.0)
+        self.release_time = self._as_signal(release_time_ms / 1000.0)
+
+    def render(self, t: np.ndarray) -> np.ndarray:
+        samples = super().render(t)
+        envelope = np.maximum(1.0, np.abs(samples) / self.thr)
+        alphas_attack = np.exp(-1.0 / (self.sample_rate * self.attack_time(t)))
+        alphas_release = np.exp(-1.0 / (self.sample_rate * self.release_time(t)))
+
+        nb_funcs.smooth_envelope(envelope, alphas_attack, alphas_release)
+        return samples / envelope

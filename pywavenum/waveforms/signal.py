@@ -8,6 +8,8 @@ import pydub
 
 Number = Union[int, float, np.int_, np.float_]
 
+MAX_INT16 = 2**15
+
 def _softplus(x: np.ndarray) -> np.ndarray:
     return np.log1p(np.exp(-np.abs(x))) + np.maximum(x, 0)
 
@@ -76,7 +78,7 @@ class Signal(ABC):
         sample_rate: int = 44100
     ) -> Tuple[np.ndarray, np.ndarray]:
         tt = np.arange((tmax - tmin) * sample_rate) / sample_rate + tmin
-        yy = (np.clip(self(tt), -1, 1) * 2**15).astype(np.int16)
+        yy = np.clip(self(tt) * MAX_INT16, -MAX_INT16, MAX_INT16 - 1).astype(np.int16)
         return tt, yy
     
     def visualize(
