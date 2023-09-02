@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import pydub
 
+from . import nb_funcs
+
 Number = Union[int, float, np.int_, np.float_]
 
 def _softplus(x: np.ndarray) -> np.ndarray:
@@ -55,6 +57,9 @@ class Signal(ABC):
 
     def __truediv__(self, other: Union[Number, "Signal"]) -> "Signal":
         return Composite(lambda a, b: a / b, self, Signal._as_signal(other), time_range_mode="intersect")
+
+    def __rtruediv__(self, other: Union[Number, "Signal"]) -> "Signal":
+        return Composite(lambda a, b: a / b, Signal._as_signal(other), self, time_range_mode="intersect")
 
     def __pow__(self, other: Union[Number, "Signal"]) -> "Signal":
         return Composite(lambda a, b: a**b, self, Signal._as_signal(other), time_range_mode="join")
@@ -266,63 +271,50 @@ class Clip(Signal):
 
 
 class DiscreteSignal(Signal):
-    def __init__(
-        self,
-        signal: Signal,
-        tmin: float = 0.0,
-        tmax: float = 1.0,
-        sample_rate: int = 44100,
-    ):
-        super().__init__((tmin, tmax))
-        self.sample_rate = sample_rate
-        self.tmin = tmin
-        self.tmax = tmax
-        self.tt, self.samples = signal.get_samples(tmin, tmax, sample_rate)
-
-    def render(self, t: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def _deduce_sample_rate(t: np.ndarray) -> float:
         dt = np.diff(t)
         if not (dt > 0).all():
             raise ValueError("All values of t must be consecutive")
-        if not np.allclose(dt[0], dt):
+        dt_mean = dt.mean()
+
+        if not np.allclose(dt_mean, dt):
             raise ValueError("All values of t must be equally spaced")
 
-        if not np.isclose(dt[0], 1.0 / self.sample_rate):
-            raise ValueError("Sample rate doesn't match")
+        return 1.0 / dt_mean
 
-        dt = dt[0]
-        tmin = t.min()
-        time_offset = self.tmin - tmin
-        if (np.abs(((time_offset + dt / 2) % dt) - dt / 2) / dt) > 1e-6:
-            raise ValueError("Grid not aligned")
+    def __init__(self, signal: Signal):
+        super().__init__(signal.time_range)
+        self.signal = signal
 
-        samples = self.samples.copy()
-
-        n_leading_zeros = int(np.round(time_offset / dt))
-        if n_leading_zeros <= 0:
-            samples = samples[-n_leading_zeros:]
-        else:
-            samples = np.concatenate([np.zeros(n_leading_zeros, dtype=samples.dtype), samples])
-
-        n_trailing_zeros = len(t) - len(samples)
-        if n_trailing_zeros <= 0:
-            samples = samples[:len(samples) + n_trailing_zeros]
-        else:
-            samples = np.concatenate([samples, np.zeros(n_trailing_zeros, dtype=samples.dtype)])
-
-        return samples
+    def render(self, t: np.ndarray) -> np.ndarray:
+        self.sample_rate = self._deduce_sample_rate(t)
+        return self.signal(t)
 
 
 class PiecewiseLinear(Signal):
-    def __init__(self, tt: np.ndarray, yy: np.ndarray):
+    def __init__(self, tt: np.ndarray, yy: np.ndarray, extend: bool = False):
         if not (np.diff(tt) > 0).all():
             raise ValueError("Times must be consecutive")
 
         if len(tt) != len(yy):
             raise ValueError("Arrays must be of same size")
 
-        super().__init__((min(tt), max(tt)))
+        if extend:
+            tmin = -np.inf
+            tmax = np.inf
+        else:
+            tmin = min(tt)
+            tmax = max(tt)
+        super().__init__((tmin, tmax))
 
-        self.signal = Constant(0, time_range=self.time_range)
+        if extend:
+            self.signal = (
+                yy[0] * Pulse(tmin, tt[0] - 1e-7)
+                + yy[-1] * Pulse(tt[-1], tmax)
+            )
+        else:
+            self.signal = Constant(0, time_range=self.time_range)
         for t0, t1, y0, y1 in zip(tt[:-1], tt[1:], yy[:-1], yy[1:]):
             self.signal = self.signal + Pulse(t0, t1 - 1e-7) * (
                 y0 + (y1 - y0) * (Time() - t0) / (t1 - t0)
@@ -330,3 +322,27 @@ class PiecewiseLinear(Signal):
 
     def render(self, t):
         return self.signal.render(t)
+
+
+class LPF(DiscreteSignal):
+    def __init__(self, signal: Signal, freq: Union[Number, Signal]):
+        super().__init__(signal)
+        self.freq = self._as_signal(freq)
+
+    def render(self, t: np.ndarray) -> np.ndarray:
+        samples = super().render(t)
+        alpha = (1.0 / (1.0 + self.sample_rate / self.freq))(t)
+        nb_funcs.low_pass_filter(samples, alpha)
+        return samples
+
+
+class HPF(DiscreteSignal):
+    def __init__(self, signal: Signal, freq: Union[Number, Signal]):
+        super().__init__(signal)
+        self.freq = self._as_signal(freq)
+
+    def render(self, t: np.ndarray) -> np.ndarray:
+        samples = super().render(t)
+        alpha = (1.0 / (1.0 + self.freq / self.sample_rate))(t)
+        nb_funcs.high_pass_filter(samples, alpha)
+        return samples
