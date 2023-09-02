@@ -6,8 +6,6 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import pydub
 
-from . import nb_funcs
-
 Number = Union[int, float, np.int_, np.float_]
 
 def _softplus(x: np.ndarray) -> np.ndarray:
@@ -41,31 +39,31 @@ class Signal(ABC):
         return v
 
     def __add__(self, other: Union[Number, "Signal"]) -> "Signal":
-        return Composite(lambda a, b: a + b, self, Signal._as_signal(other), time_range_mode="join")
+        return CompositeSignal(lambda a, b: a + b, self, Signal._as_signal(other), time_range_mode="join")
 
     def __radd__(self, other: Union[Number, "Signal"]) -> "Signal":
         return self + other
 
     def __sub__(self, other: Union[Number, "Signal"]) -> "Signal":
-        return Composite(lambda a, b: a - b, self, Signal._as_signal(other), time_range_mode="join")
+        return CompositeSignal(lambda a, b: a - b, self, Signal._as_signal(other), time_range_mode="join")
 
     def __mul__(self, other: Union[Number, "Signal"]) -> "Signal":
-        return Composite(lambda a, b: a * b, self, Signal._as_signal(other), time_range_mode="intersect")
+        return CompositeSignal(lambda a, b: a * b, self, Signal._as_signal(other), time_range_mode="intersect")
 
     def __rmul__(self, other: Union[Number, "Signal"]) -> "Signal":
         return self * other
 
     def __truediv__(self, other: Union[Number, "Signal"]) -> "Signal":
-        return Composite(lambda a, b: a / b, self, Signal._as_signal(other), time_range_mode="intersect")
+        return CompositeSignal(lambda a, b: a / b, self, Signal._as_signal(other), time_range_mode="intersect")
 
     def __rtruediv__(self, other: Union[Number, "Signal"]) -> "Signal":
-        return Composite(lambda a, b: a / b, Signal._as_signal(other), self, time_range_mode="intersect")
+        return CompositeSignal(lambda a, b: a / b, Signal._as_signal(other), self, time_range_mode="intersect")
 
     def __pow__(self, other: Union[Number, "Signal"]) -> "Signal":
-        return Composite(lambda a, b: a**b, self, Signal._as_signal(other), time_range_mode="join")
+        return CompositeSignal(lambda a, b: a**b, self, Signal._as_signal(other), time_range_mode="join")
 
     def __rpow__(self, other: Union[Number, "Signal"]) -> "Signal":
-        return Composite(lambda a, b: a**b, Signal._as_signal(other), self, time_range_mode="join")
+        return CompositeSignal(lambda a, b: a**b, Signal._as_signal(other), self, time_range_mode="join")
 
     def gain(self, dB: Union[Number, "Signal"]) -> "Signal":
         factor = 10**(Signal._as_signal(dB) / 20)
@@ -134,7 +132,16 @@ class Time(Signal):
         return t
 
 
-class Composite(Signal):
+class Constant(Signal):
+    def __init__(self, value: Union[Number, Signal], **kwargs):
+        super().__init__(**kwargs)
+        self.val = value
+
+    def render(self, t: np.ndarray) -> np.ndarray:
+        return self.val * np.ones_like(t)
+
+
+class CompositeSignal(Signal):
     def __init__(self, func: Callable, *signals: Signal, time_range_mode: str):
         self.func = func
         self.signals = signals
@@ -152,15 +159,6 @@ class Composite(Signal):
 
     def render(self, t: np.ndarray) -> np.ndarray:
         return self.func(*[s(t) for s in self.signals])
-
-
-class Constant(Signal):
-    def __init__(self, value: Union[Number, Signal], **kwargs):
-        super().__init__(**kwargs)
-        self.val = value
-
-    def render(self, t: np.ndarray) -> np.ndarray:
-        return self.val * np.ones_like(t)
 
 
 class Sine(Signal):
@@ -270,28 +268,6 @@ class Clip(Signal):
         )
 
 
-class DiscreteSignal(Signal):
-    @staticmethod
-    def _deduce_sample_rate(t: np.ndarray) -> float:
-        dt = np.diff(t)
-        if not (dt > 0).all():
-            raise ValueError("All values of t must be consecutive")
-        dt_mean = dt.mean()
-
-        if not np.allclose(dt_mean, dt):
-            raise ValueError("All values of t must be equally spaced")
-
-        return 1.0 / dt_mean
-
-    def __init__(self, signal: Signal):
-        super().__init__(signal.time_range)
-        self.signal = signal
-
-    def render(self, t: np.ndarray) -> np.ndarray:
-        self.sample_rate = self._deduce_sample_rate(t)
-        return self.signal(t)
-
-
 class PiecewiseLinear(Signal):
     def __init__(self, tt: np.ndarray, yy: np.ndarray, extend: bool = False):
         if not (np.diff(tt) > 0).all():
@@ -322,27 +298,3 @@ class PiecewiseLinear(Signal):
 
     def render(self, t):
         return self.signal.render(t)
-
-
-class LPF(DiscreteSignal):
-    def __init__(self, signal: Signal, freq: Union[Number, Signal]):
-        super().__init__(signal)
-        self.freq = self._as_signal(freq)
-
-    def render(self, t: np.ndarray) -> np.ndarray:
-        samples = super().render(t)
-        alpha = (1.0 / (1.0 + self.sample_rate / self.freq))(t)
-        nb_funcs.low_pass_filter(samples, alpha)
-        return samples
-
-
-class HPF(DiscreteSignal):
-    def __init__(self, signal: Signal, freq: Union[Number, Signal]):
-        super().__init__(signal)
-        self.freq = self._as_signal(freq)
-
-    def render(self, t: np.ndarray) -> np.ndarray:
-        samples = super().render(t)
-        alpha = (1.0 / (1.0 + self.freq / self.sample_rate))(t)
-        nb_funcs.high_pass_filter(samples, alpha)
-        return samples
